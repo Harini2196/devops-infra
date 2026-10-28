@@ -1,0 +1,7 @@
+# Copy to backend.hcl for local runs:  terraform init -backend-config=backend.hcl
+# Use the SAME values as the GitHub repository variables so local and CI share state.
+bucket       = "CHANGE_ME-tfstate-bucket"
+key          = "netflix-devsecops/terraform.tfstate"
+region       = "us-east-1"
+encrypt      = true
+use_lockfile = true # S3-native state locking (Terraform >= 1.10), no DynamoDB needed

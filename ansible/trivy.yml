@@ -1,0 +1,96 @@
+---
+# Installs Trivy on RHEL/CentOS 9 and runs it in client/server mode on port 8080,
+# so Jenkins can scan with:  trivy image --server http://trivy-server.<domain>:8080 <image>
+- name: Install and configure Trivy server
+  hosts: all
+  become: true
+  vars:
+    trivy_port: 8080
+    trivy_cache_dir: /var/lib/trivy
+
+  tasks:
+    - name: Add Trivy repository
+      ansible.builtin.yum_repository:
+        name: trivy
+        description: Trivy repository
+        baseurl: "https://aquasecurity.github.io/trivy-repo/rpm/releases/$basearch/"
+        gpgcheck: true
+        gpgkey: https://aquasecurity.github.io/trivy-repo/rpm/public.key
+        enabled: true
+
+    - name: Install Trivy
+      ansible.builtin.dnf:
+        name: trivy
+        state: present
+        update_cache: true
+
+    - name: Create trivy system user
+      ansible.builtin.user:
+        name: trivy
+        system: true
+        shell: /sbin/nologin
+        create_home: false
+
+    - name: Create cache directory
+      ansible.builtin.file:
+        path: "{{ trivy_cache_dir }}"
+        state: directory
+        owner: trivy
+        group: trivy
+        mode: "0755"
+
+    - name: Pre-download vulnerability DB
+      ansible.builtin.command: >
+        trivy image --download-db-only --cache-dir {{ trivy_cache_dir }}
+      become_user: trivy
+      args:
+        creates: "{{ trivy_cache_dir }}/db/trivy.db"
+
+    - name: Trivy server systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/trivy-server.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Trivy vulnerability scanner (server mode)
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          User=trivy
+          Group=trivy
+          ExecStart=/usr/bin/trivy server --listen 0.0.0.0:{{ trivy_port }} --cache-dir {{ trivy_cache_dir }}
+          Restart=always
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart Trivy
+
+    - name: Start and enable Trivy server
+      ansible.builtin.systemd:
+        name: trivy-server
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for Trivy to listen on {{ trivy_port }}
+      ansible.builtin.wait_for:
+        port: "{{ trivy_port }}"
+        timeout: 120
+
+    - name: Trivy version
+      ansible.builtin.command: trivy --version
+      register: trivy_ver
+      changed_when: false
+
+    - name: Show Trivy version
+      ansible.builtin.debug:
+        var: trivy_ver.stdout_lines
+
+  handlers:
+    - name: Restart Trivy
+      ansible.builtin.systemd:
+        name: trivy-server
+        state: restarted
+        daemon_reload: true
