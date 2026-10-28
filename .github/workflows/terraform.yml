@@ -2,13 +2,13 @@ name: Terraform – DevSecOps Infra
 
 on:
   pull_request:
-    branches: [main]
+    branches: [master]
     paths:
       - "terraform/**"
       - "ansible/**"
       - ".github/workflows/terraform.yml"
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "terraform/**"
       - "ansible/**"
@@ -119,7 +119,7 @@ jobs:
         run: rm -f "$RUNNER_TEMP/ec2.pem"
 
   # ------------------------------------------------------------------
-  # 2. Apply  (push to main, or manual "apply")
+  # 2. Apply  (push to master, or manual "apply")
   #    Re-plans in this job so the runner's own IP is allowed for SSH.
   #    Add required reviewers to the "production" environment for a manual gate.
   # ------------------------------------------------------------------
@@ -128,7 +128,7 @@ jobs:
     needs: plan
     runs-on: ubuntu-latest
     if: >
-      (github.event_name == 'push' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/master') ||
       (github.event_name == 'workflow_dispatch' && inputs.action == 'apply')
     environment: production
     defaults:
