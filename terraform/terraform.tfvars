@@ -1,4 +1,4 @@
-aws_region    = "us-east-1"
+aws_region    = "ap-southeast-2"
 instance_type = "t2.large"
 
 # RHEL 9 (Red Hat official AMIs). For CentOS Stream 9 instead use:
