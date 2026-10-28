@@ -1,0 +1,203 @@
+---
+# Installs SonarQube Community (backed by PostgreSQL) on RHEL/CentOS 9.
+# SonarQube listens on port 8080 (allowed by the security group).
+- name: Install and configure SonarQube
+  hosts: all
+  become: true
+  vars:
+    sonar_version: "10.6.0.92116"
+    sonar_zip_url: "https://binaries.sonarsource.com/Distribution/sonarqube/sonarqube-{{ sonar_version }}.zip"
+    sonar_home: /opt/sonarqube
+    sonar_port: 8080
+    sonar_user: sonar
+    sonar_db_name: sonarqube
+    sonar_db_user: sonar
+    # Change this (or pass with -e sonar_db_password=...)
+    sonar_db_password: "Sonar@123"
+    java_package: java-17-openjdk
+
+  tasks:
+    # ---------- OS tuning required by Elasticsearch inside SonarQube ----------
+    - name: Kernel parameters for SonarQube
+      ansible.builtin.copy:
+        dest: /etc/sysctl.d/99-sonarqube.conf
+        content: |
+          vm.max_map_count=524288
+          fs.file-max=131072
+        mode: "0644"
+      register: sysctl_conf
+
+    - name: Apply kernel parameters
+      ansible.builtin.command: sysctl --system
+      when: sysctl_conf.changed
+
+    - name: File/process limits for sonar user
+      ansible.builtin.copy:
+        dest: /etc/security/limits.d/99-sonarqube.conf
+        content: |
+          {{ sonar_user }}   -   nofile   131072
+          {{ sonar_user }}   -   nproc    8192
+        mode: "0644"
+
+    # ---------- Packages ----------
+    - name: Install Java, PostgreSQL, unzip
+      ansible.builtin.dnf:
+        name:
+          - "{{ java_package }}"
+          - postgresql-server
+          - postgresql
+          - unzip
+          - wget
+        state: present
+
+    # ---------- PostgreSQL ----------
+    - name: Initialise PostgreSQL cluster
+      ansible.builtin.command: postgresql-setup --initdb
+      args:
+        creates: /var/lib/pgsql/data/PG_VERSION
+
+    - name: Use md5 auth for local TCP connections
+      ansible.builtin.replace:
+        path: /var/lib/pgsql/data/pg_hba.conf
+        regexp: '^(host\s+all\s+all\s+(127\.0\.0\.1/32|::1/128)\s+)ident'
+        replace: '\1md5'
+      notify: Restart PostgreSQL
+
+    - name: Start and enable PostgreSQL
+      ansible.builtin.systemd:
+        name: postgresql
+        state: started
+        enabled: true
+
+    - name: Flush handlers (apply pg_hba change now)
+      ansible.builtin.meta: flush_handlers
+
+    - name: Check whether DB role exists
+      ansible.builtin.command: >
+        psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='{{ sonar_db_user }}'"
+      become_user: postgres
+      register: role_check
+      changed_when: false
+
+    - name: Create DB role
+      ansible.builtin.command: >
+        psql -c "CREATE USER {{ sonar_db_user }} WITH ENCRYPTED PASSWORD '{{ sonar_db_password }}'"
+      become_user: postgres
+      when: role_check.stdout != "1"
+      no_log: true
+
+    - name: Check whether database exists
+      ansible.builtin.command: >
+        psql -tAc "SELECT 1 FROM pg_database WHERE datname='{{ sonar_db_name }}'"
+      become_user: postgres
+      register: db_check
+      changed_when: false
+
+    - name: Create database
+      ansible.builtin.command: >
+        psql -c "CREATE DATABASE {{ sonar_db_name }} OWNER {{ sonar_db_user }}"
+      become_user: postgres
+      when: db_check.stdout != "1"
+
+    # ---------- SonarQube ----------
+    - name: Create sonar system user
+      ansible.builtin.user:
+        name: "{{ sonar_user }}"
+        system: true
+        shell: /bin/bash
+        home: "{{ sonar_home }}"
+        create_home: false
+
+    - name: Download SonarQube
+      ansible.builtin.get_url:
+        url: "{{ sonar_zip_url }}"
+        dest: "/tmp/sonarqube-{{ sonar_version }}.zip"
+        mode: "0644"
+        timeout: 120
+
+    - name: Extract SonarQube
+      ansible.builtin.unarchive:
+        src: "/tmp/sonarqube-{{ sonar_version }}.zip"
+        dest: /opt
+        remote_src: true
+        creates: "/opt/sonarqube-{{ sonar_version }}"
+
+    - name: Symlink {{ sonar_home }}
+      ansible.builtin.file:
+        src: "/opt/sonarqube-{{ sonar_version }}"
+        dest: "{{ sonar_home }}"
+        state: link
+
+    - name: Ownership of SonarQube files
+      ansible.builtin.file:
+        path: "/opt/sonarqube-{{ sonar_version }}"
+        owner: "{{ sonar_user }}"
+        group: "{{ sonar_user }}"
+        recurse: true
+
+    - name: Configure sonar.properties
+      ansible.builtin.lineinfile:
+        path: "{{ sonar_home }}/conf/sonar.properties"
+        regexp: "^#?{{ item.key | regex_escape }}="
+        line: "{{ item.key }}={{ item.value }}"
+      loop:
+        - { key: "sonar.jdbc.username", value: "{{ sonar_db_user }}" }
+        - { key: "sonar.jdbc.password", value: "{{ sonar_db_password }}" }
+        - { key: "sonar.jdbc.url", value: "jdbc:postgresql://127.0.0.1:5432/{{ sonar_db_name }}" }
+        - { key: "sonar.web.host", value: "0.0.0.0" }
+        - { key: "sonar.web.port", value: "{{ sonar_port }}" }
+      no_log: true
+      notify: Restart SonarQube
+
+    - name: SonarQube systemd unit
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/sonarqube.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=SonarQube service
+          After=network.target postgresql.service
+          Requires=postgresql.service
+
+          [Service]
+          Type=forking
+          ExecStart={{ sonar_home }}/bin/linux-x86-64/sonar.sh start
+          ExecStop={{ sonar_home }}/bin/linux-x86-64/sonar.sh stop
+          User={{ sonar_user }}
+          Group={{ sonar_user }}
+          LimitNOFILE=131072
+          LimitNPROC=8192
+          Restart=always
+          TimeoutStartSec=300
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Restart SonarQube
+
+    - name: Start and enable SonarQube
+      ansible.builtin.systemd:
+        name: sonarqube
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for SonarQube to listen on {{ sonar_port }}
+      ansible.builtin.wait_for:
+        port: "{{ sonar_port }}"
+        timeout: 600
+
+    - name: SonarQube login info
+      ansible.builtin.debug:
+        msg: "SonarQube is up on port {{ sonar_port }} - default login admin / admin (you'll be asked to change it)"
+
+  handlers:
+    - name: Restart PostgreSQL
+      ansible.builtin.systemd:
+        name: postgresql
+        state: restarted
+
+    - name: Restart SonarQube
+      ansible.builtin.systemd:
+        name: sonarqube
+        state: restarted
+        daemon_reload: true

@@ -1,0 +1,86 @@
+---
+# Installs Jenkins LTS (port 8080) on RHEL/CentOS 9
+- name: Install and configure Jenkins
+  hosts: all
+  become: true
+  vars:
+    jenkins_repo_url: https://pkg.jenkins.io/redhat-stable/jenkins.repo
+    jenkins_repo_key: https://pkg.jenkins.io/redhat-stable/jenkins.io-2023.key
+    jenkins_port: 8080
+    java_package: java-21-openjdk
+
+  tasks:
+    - name: Install prerequisites (Java, fontconfig, git, wget)
+      ansible.builtin.dnf:
+        name:
+          - "{{ java_package }}"
+          - fontconfig
+          - git
+          - wget
+          - unzip
+        state: present
+
+    - name: Import Jenkins GPG key
+      ansible.builtin.rpm_key:
+        key: "{{ jenkins_repo_key }}"
+        state: present
+
+    - name: Add Jenkins repository
+      ansible.builtin.get_url:
+        url: "{{ jenkins_repo_url }}"
+        dest: /etc/yum.repos.d/jenkins.repo
+        mode: "0644"
+
+    - name: Install Jenkins
+      ansible.builtin.dnf:
+        name: jenkins
+        state: present
+        update_cache: true
+
+    - name: Create systemd override directory
+      ansible.builtin.file:
+        path: /etc/systemd/system/jenkins.service.d
+        state: directory
+        mode: "0755"
+
+    - name: Set Jenkins HTTP port (survives package upgrades)
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/jenkins.service.d/override.conf
+        mode: "0644"
+        content: |
+          [Service]
+          Environment="JENKINS_PORT={{ jenkins_port }}"
+      notify: Restart Jenkins
+
+    - name: Start and enable Jenkins
+      ansible.builtin.systemd:
+        name: jenkins
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Wait for Jenkins to listen on {{ jenkins_port }}
+      ansible.builtin.wait_for:
+        port: "{{ jenkins_port }}"
+        timeout: 300
+
+    - name: Wait for initial admin password file
+      ansible.builtin.wait_for:
+        path: /var/lib/jenkins/secrets/initialAdminPassword
+        timeout: 300
+
+    - name: Read initial admin password
+      ansible.builtin.slurp:
+        src: /var/lib/jenkins/secrets/initialAdminPassword
+      register: jenkins_pw
+
+    - name: Show initial admin password
+      ansible.builtin.debug:
+        msg: "Jenkins initial admin password: {{ jenkins_pw.content | b64decode | trim }}"
+
+  handlers:
+    - name: Restart Jenkins
+      ansible.builtin.systemd:
+        name: jenkins
+        state: restarted
+        daemon_reload: true
